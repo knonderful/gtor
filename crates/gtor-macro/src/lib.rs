@@ -182,6 +182,23 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
 struct YieldRewriter;
 
 impl VisitMut for YieldRewriter {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::Macro(syn::ExprMacro { mac, .. }) = expr {
+            if mac.path.is_ident("yield_value") {
+                let tokens = mac.tokens.clone();
+
+                *expr = syn::parse_quote! {
+                    // SAFETY: The context is guaranteed to be in the correct scope.
+                    unsafe { ctx.yield_value(#tokens).await }
+                };
+
+                return;
+            }
+        }
+
+        visit_mut::visit_expr_mut(self, expr);
+    }
+
     fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
         if let Stmt::Macro(StmtMacro {
             attrs: _,
