@@ -9,6 +9,29 @@ use syn::{
     Expr, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
 };
 
+/// Creates a generator function.
+///
+/// # Example
+///
+/// ```
+/// use gtor_macro::generator;
+/// use std::pin::pin;
+///
+/// #[generator(yield_type = usize)]
+/// fn generate_numbers(from: usize, count: usize) {
+///     let mut i = from;
+///     while i < from + count {
+///         yield_value!(i);
+///         i += 1;
+///     }
+/// }
+///
+/// let mut expected = vec![15, 14, 13, 12];
+/// for i in pin!(generate_numbers(12, 4)) {
+///     assert_eq!(expected.pop().unwrap(), i);
+/// }
+/// assert!(expected.is_empty());
+/// ```
 #[proc_macro_attribute]
 pub fn generator(attr: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as GeneratorArgs);
