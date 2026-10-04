@@ -4,8 +4,9 @@ use quote::quote;
 use std::collections::BTreeSet;
 use syn::{
     parse_macro_input,
+    visit::{self, Visit},
     visit_mut::{self, VisitMut},
-    Expr, FnArg, ItemFn, Lifetime, ReceiverKind, ReturnType, Stmt, StmtMacro, Token, Type,
+    Expr, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
 };
 
 #[proc_macro_attribute]
@@ -121,33 +122,12 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     let inputs = &function.sig.inputs;
 
     // Collect all the input lifetimes...
-    let mut lifetime_idents: BTreeSet<Ident> = BTreeSet::new();
-    let mut add_lifetime = |lifetime: Option<Lifetime>| {
-        lifetime_idents.insert(
-            lifetime
-                .map(|lt| lt.ident)
-                .unwrap_or_else(|| Ident::new("_", Span::call_site())),
-        );
-    };
-
-    for arg in inputs {
-        match arg {
-            FnArg::Receiver(recv) => {
-                if let ReceiverKind::Reference(_, lifetime, _) = &recv.kind {
-                    add_lifetime(lifetime.clone());
-                }
-            }
-            FnArg::Typed(pat_type) => {
-                if let Type::Reference(reference) = pat_type.ty.as_ref() {
-                    add_lifetime(reference.lifetime.clone());
-                }
-            }
-        }
-    }
+    let mut lifetime_collector = LifetimeCollector::default();
+    lifetime_collector.visit_item_fn(function);
 
     // ... and generate a `+ use < '_, 'a, >` to append to the future
     let mut use_lifetimes = quote! {};
-    for ident in lifetime_idents {
+    for ident in lifetime_collector.lifetimes {
         let lifetime = Lifetime {
             apostrophe: Span::call_site(),
             ident,
@@ -221,5 +201,29 @@ impl VisitMut for YieldRewriter {
         }
 
         visit_mut::visit_stmt_mut(self, stmt);
+    }
+}
+
+#[derive(Default)]
+struct LifetimeCollector {
+    lifetimes: BTreeSet<Ident>,
+}
+
+impl<'ast> Visit<'ast> for LifetimeCollector {
+    fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
+        self.lifetimes.insert(lifetime.ident.clone());
+        visit::visit_lifetime(self, lifetime);
+    }
+
+    fn visit_type_reference(&mut self, reference: &'ast TypeReference) {
+        self.lifetimes.insert(
+            reference
+                .lifetime
+                .as_ref()
+                .map(|lt| lt.ident.clone())
+                .unwrap_or_else(|| Ident::new("_", Span::call_site())),
+        );
+
+        visit::visit_type_reference(self, reference);
     }
 }
