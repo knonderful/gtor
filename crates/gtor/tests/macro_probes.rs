@@ -13,6 +13,6 @@ fn macro_probes() {
     t.compile_fail("tests/macro_probes/f4_generic_type_param.rs");
     t.compile_fail("tests/macro_probes/f4_two_elided_lifetimes.rs");
     t.compile_fail("tests/macro_probes/f4_nested_lifetime.rs");
-    t.compile_fail("tests/macro_probes/f6_yield_in_match_arm.rs");
+    t.pass("tests/macro_probes/f6_yield_in_match_arm.rs");
     t.compile_fail("tests/macro_probes/f7_ctx_shadowing.rs");
 }

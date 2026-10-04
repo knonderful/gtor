@@ -10,7 +10,7 @@ safe, public API of `gtor`.
 | Fixed  | 3 `Clone` on `GeneratorContext`               | `review_probes.rs`, `finding_3_*`                    | as for finding 1                                                  |
 | Open   | 4 `use<..>` incomplete                        | `crates/gtor/tests/macro_probes/f4_*.rs` + `.stderr` | `cargo test -p gtor --test macro_probes`                          |
 | Fixed  | 5 MSRV 1.84 too low                           | pristine checkout without trybuild                   | `cargo +1.84.1 check -p gtor --tests`                             |
-| Open   | 6 `yield_value!` in expression position       | `macro_probes/f6_yield_in_match_arm.rs`              | as for finding 4                                                  |
+| Fixed  | 6 `yield_value!` in expression position       | `macro_probes/f6_yield_in_match_arm.rs`              | as for finding 4                                                  |
 | Open   | 7 `ctx` hygiene                               | `macro_probes/f7_ctx_shadowing.rs`                   | as for finding 4                                                  |
 | Fixed  | 9 example package name                        | none needed                                          | `cargo run -p gtor-macro-example`                                 |
 
