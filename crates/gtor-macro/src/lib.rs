@@ -6,7 +6,7 @@ use syn::{
     parse_macro_input,
     visit::{self, Visit},
     visit_mut::{self, VisitMut},
-    Expr, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
+    Expr, GenericParam, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
 };
 
 /// Creates a generator function.
@@ -149,13 +149,22 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     lifetime_collector.visit_item_fn(function);
 
     // ... and generate a `+ use < '_, 'a, >` to append to the future
-    let mut use_lifetimes = quote! {};
+    let mut use_generics = quote! {};
     for ident in lifetime_collector.lifetimes {
-        let lifetime = Lifetime {
+        let entry = Lifetime {
             apostrophe: Span::call_site(),
             ident,
         };
-        use_lifetimes = quote! { #use_lifetimes #lifetime, };
+        use_generics = quote! { #use_generics #entry, };
+    }
+
+    // ... and also add all generic types (e.g. `T, U, X`)
+    for param in function.sig.generics.params.iter() {
+        let &GenericParam::Type(ty) = &param else {
+            continue;
+        };
+        let ident = &ty.ident;
+        use_generics = quote! { #use_generics #ident, }
     }
 
     let where_clause = &function.sig.generics.where_clause;
@@ -167,7 +176,7 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
         #vis fn #name #generics(
             #inputs
         ) -> ::gtor::Generator<
-            impl ::core::future::Future<Output = #return_type> + use< #use_lifetimes >,
+            impl ::core::future::Future<Output = #return_type> + use< #use_generics >,
             #yield_type
         >
         #where_clause
