@@ -8,7 +8,7 @@ safe, public API of `gtor`.
 | Fixed     | 1 `Yield::poll` trusts the waker data pointer | `crates/gtor/tests/review_probes.rs`, `finding_1_*`  | `cargo test -p gtor --test review_probes` (debug and `--release`) |
 | Fixed     | 2 state pointer derived from `&State`         | crate's own `test::test_infinite` under Miri         | `cargo +nightly miri test -p gtor --lib`                          |
 | Fixed     | 3 `Clone` on `GeneratorContext`               | `review_probes.rs`, `finding_3_*`                    | as for finding 1                                                  |
-| Fixed 1/3 | 4 `use<..>` incomplete                        | `crates/gtor/tests/macro_probes/f4_*.rs` + `.stderr` | `cargo test -p gtor --test macro_probes`                          |
+| Fixed 2/3 | 4 `use<..>` incomplete                        | `crates/gtor/tests/macro_probes/f4_*.rs` + `.stderr` | `cargo test -p gtor --test macro_probes`                          |
 | Fixed     | 5 MSRV 1.84 too low                           | pristine checkout without trybuild                   | `cargo +1.84.1 check -p gtor --tests`                             |
 | Fixed     | 6 `yield_value!` in expression position       | `macro_probes/f6_yield_in_match_arm.rs`              | as for finding 4                                                  |
 | Open      | 7 `ctx` hygiene                               | `macro_probes/f7_ctx_shadowing.rs`                   | as for finding 4                                                  |
