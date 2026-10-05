@@ -17,4 +17,5 @@ quote = "1"
 syn = { version = "3", features = ["full", "visit", "visit-mut"] }
 
 [dev-dependencies]
-gtor = { workspace = true }
+# This must be a relative path and not `workspace = true`, because otherwise we can't publish this (chicken/egg).
+gtor = { path = "../gtor" }
