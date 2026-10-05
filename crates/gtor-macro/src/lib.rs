@@ -4,10 +4,34 @@ use quote::quote;
 use std::collections::BTreeSet;
 use syn::{
     parse_macro_input,
+    visit::{self, Visit},
     visit_mut::{self, VisitMut},
-    Expr, FnArg, ItemFn, Lifetime, ReceiverKind, ReturnType, Stmt, StmtMacro, Token, Type,
+    Expr, GenericParam, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
 };
 
+/// Creates a generator function.
+///
+/// # Example
+///
+/// ```
+/// use gtor_macro::generator;
+/// use std::pin::pin;
+///
+/// #[generator(yield_type = usize)]
+/// fn generate_numbers(from: usize, count: usize) {
+///     let mut i = from;
+///     while i < from + count {
+///         yield_value!(i);
+///         i += 1;
+///     }
+/// }
+///
+/// let mut expected = vec![15, 14, 13, 12];
+/// for i in pin!(generate_numbers(12, 4)) {
+///     assert_eq!(expected.pop().unwrap(), i);
+/// }
+/// assert!(expected.is_empty());
+/// ```
 #[proc_macro_attribute]
 pub fn generator(attr: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as GeneratorArgs);
@@ -76,7 +100,8 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     //     yield_value!(expression);
     // into:
     //     ctx.yield_value(expression).await;
-    let mut rewriter = YieldRewriter;
+    let ctx = Ident::new("ctx", Span::mixed_site());
+    let mut rewriter = YieldRewriter { ctx_ident: &ctx };
     rewriter.visit_block_mut(body);
 
     let my_return_type = match &function.sig.output {
@@ -121,38 +146,26 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     let inputs = &function.sig.inputs;
 
     // Collect all the input lifetimes...
-    let mut lifetime_idents: BTreeSet<Ident> = BTreeSet::new();
-    let mut add_lifetime = |lifetime: Option<Lifetime>| {
-        lifetime_idents.insert(
-            lifetime
-                .map(|lt| lt.ident)
-                .unwrap_or_else(|| Ident::new("_", Span::call_site())),
-        );
-    };
-
-    for arg in inputs {
-        match arg {
-            FnArg::Receiver(recv) => {
-                if let ReceiverKind::Reference(_, lifetime, _) = &recv.kind {
-                    add_lifetime(lifetime.clone());
-                }
-            }
-            FnArg::Typed(pat_type) => {
-                if let Type::Reference(reference) = pat_type.ty.as_ref() {
-                    add_lifetime(reference.lifetime.clone());
-                }
-            }
-        }
-    }
+    let mut lifetime_collector = LifetimeCollector::default();
+    lifetime_collector.visit_item_fn(function);
 
     // ... and generate a `+ use < '_, 'a, >` to append to the future
-    let mut use_lifetimes = quote! {};
-    for ident in lifetime_idents {
-        let lifetime = Lifetime {
+    let mut use_generics = quote! {};
+    for ident in lifetime_collector.lifetimes {
+        let entry = Lifetime {
             apostrophe: Span::call_site(),
             ident,
         };
-        use_lifetimes = quote! { #use_lifetimes #lifetime, };
+        use_generics = quote! { #use_generics #entry, };
+    }
+
+    // ... and also add all generic types (e.g. `T, U, X`)
+    for param in function.sig.generics.params.iter() {
+        let &GenericParam::Type(ty) = &param else {
+            continue;
+        };
+        let ident = &ty.ident;
+        use_generics = quote! { #use_generics #ident, }
     }
 
     let where_clause = &function.sig.generics.where_clause;
@@ -164,12 +177,12 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
         #vis fn #name #generics(
             #inputs
         ) -> ::gtor::Generator<
-            impl ::core::future::Future<Output = #return_type> + use< #use_lifetimes >,
+            impl ::core::future::Future<Output = #return_type> + use< #use_generics >,
             #yield_type
         >
         #where_clause
         {
-            let future_factory = async move |mut ctx: ::gtor::GeneratorContext<#yield_type>| {
+            let future_factory = async move |mut #ctx: ::gtor::GeneratorContext<#yield_type>| {
                 #body
             };
             ::gtor::create_generator_mapped(future_factory, #future_mapper)
@@ -179,9 +192,29 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     Ok(expanded)
 }
 
-struct YieldRewriter;
+struct YieldRewriter<'a> {
+    ctx_ident: &'a Ident,
+}
 
-impl VisitMut for YieldRewriter {
+impl VisitMut for YieldRewriter<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::Macro(syn::ExprMacro { mac, .. }) = expr {
+            if mac.path.is_ident("yield_value") {
+                let ctx = &self.ctx_ident;
+                let tokens = mac.tokens.clone();
+
+                *expr = syn::parse_quote! {
+                    // SAFETY: The context is guaranteed to be in the correct scope.
+                    unsafe { #ctx.yield_value(#tokens).await }
+                };
+
+                return;
+            }
+        }
+
+        visit_mut::visit_expr_mut(self, expr);
+    }
+
     fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
         if let Stmt::Macro(StmtMacro {
             attrs: _,
@@ -190,10 +223,12 @@ impl VisitMut for YieldRewriter {
         }) = stmt
         {
             if mac.path.is_ident("yield_value") {
+                let ctx = &self.ctx_ident;
                 let tokens = mac.tokens.clone();
 
                 let expr: Expr = syn::parse_quote! {
-                    ctx.yield_value(#tokens).await
+                    // SAFETY: The context is guaranteed to be in the correct scope.
+                    unsafe { #ctx.yield_value(#tokens).await }
                 };
 
                 *stmt = Stmt::Expr(expr, *semi_token);
@@ -203,5 +238,29 @@ impl VisitMut for YieldRewriter {
         }
 
         visit_mut::visit_stmt_mut(self, stmt);
+    }
+}
+
+#[derive(Default)]
+struct LifetimeCollector {
+    lifetimes: BTreeSet<Ident>,
+}
+
+impl<'ast> Visit<'ast> for LifetimeCollector {
+    fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
+        self.lifetimes.insert(lifetime.ident.clone());
+        visit::visit_lifetime(self, lifetime);
+    }
+
+    fn visit_type_reference(&mut self, reference: &'ast TypeReference) {
+        self.lifetimes.insert(
+            reference
+                .lifetime
+                .as_ref()
+                .map(|lt| lt.ident.clone())
+                .unwrap_or_else(|| Ident::new("_", Span::call_site())),
+        );
+
+        visit::visit_type_reference(self, reference);
     }
 }
