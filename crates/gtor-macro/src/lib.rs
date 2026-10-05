@@ -100,7 +100,8 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     //     yield_value!(expression);
     // into:
     //     ctx.yield_value(expression).await;
-    let mut rewriter = YieldRewriter;
+    let ctx = Ident::new("ctx", Span::mixed_site());
+    let mut rewriter = YieldRewriter { ctx_ident: &ctx };
     rewriter.visit_block_mut(body);
 
     let my_return_type = match &function.sig.output {
@@ -181,7 +182,7 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
         >
         #where_clause
         {
-            let future_factory = async move |mut ctx: ::gtor::GeneratorContext<#yield_type>| {
+            let future_factory = async move |mut #ctx: ::gtor::GeneratorContext<#yield_type>| {
                 #body
             };
             ::gtor::create_generator_mapped(future_factory, #future_mapper)
@@ -191,17 +192,20 @@ fn expand_generator(function: &mut ItemFn, yield_type: Type) -> syn::Result<proc
     Ok(expanded)
 }
 
-struct YieldRewriter;
+struct YieldRewriter<'a> {
+    ctx_ident: &'a Ident,
+}
 
-impl VisitMut for YieldRewriter {
+impl VisitMut for YieldRewriter<'_> {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         if let Expr::Macro(syn::ExprMacro { mac, .. }) = expr {
             if mac.path.is_ident("yield_value") {
+                let ctx = &self.ctx_ident;
                 let tokens = mac.tokens.clone();
 
                 *expr = syn::parse_quote! {
                     // SAFETY: The context is guaranteed to be in the correct scope.
-                    unsafe { ctx.yield_value(#tokens).await }
+                    unsafe { #ctx.yield_value(#tokens).await }
                 };
 
                 return;
@@ -219,11 +223,12 @@ impl VisitMut for YieldRewriter {
         }) = stmt
         {
             if mac.path.is_ident("yield_value") {
+                let ctx = &self.ctx_ident;
                 let tokens = mac.tokens.clone();
 
                 let expr: Expr = syn::parse_quote! {
                     // SAFETY: The context is guaranteed to be in the correct scope.
-                    unsafe { ctx.yield_value(#tokens).await }
+                    unsafe { #ctx.yield_value(#tokens).await }
                 };
 
                 *stmt = Stmt::Expr(expr, *semi_token);
