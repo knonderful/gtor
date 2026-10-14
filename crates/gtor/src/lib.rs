@@ -141,7 +141,7 @@ impl<Y> Future for Yield<'_, Y> {
                 // SAFETY:
                 // This depends on the the correct pointer being set in the executor (in this case
                 // the `Generator::next()` implementation. `Yield` nor `GeneratorContext` can not be
-                // constructed by the user. This means that a `Yield` can only appear inside of a
+                // constructed by the user. This means that a `Yield` can only appear inside a
                 // `Generator`.
                 //
                 // Secondly, `Yield` can not escape its  encapsulating `Future` (async function)
@@ -244,7 +244,7 @@ where
 
         // We're putting a pointer to the state on the waker. This pointer will be used by `Yield`
         // to set the yielded value directly in the state. This would be OK even if `self` were not
-        // pinned here, since the pointer is only accessed inside of the `Future::poll()` below and
+        // pinned here, since the pointer is only accessed inside the `Future::poll()` below and
         // we're not moving the generator around in memory during that time.
         let waker = generator_waker(&self.state);
         let mut cx = Context::from_waker(&waker);
