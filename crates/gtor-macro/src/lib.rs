@@ -1,3 +1,11 @@
+//! # gtor-macro
+//!
+//! This crate provides the proc-macro implementation for [`gtor`](../gtor/index.html). It is not
+//! intended for direct use; re-exported through `gtor` as `gtor::generator`.
+//!
+//! The public entry point is the [`generator`] attribute macro, which rewrites an ordinary
+//! function into one that returns a `gtor::Generator`. See the [crate docs of `gtor`](../gtor/index.html)
+//! for a full tour and examples.
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
@@ -9,28 +17,57 @@ use syn::{
     Expr, GenericParam, ItemFn, Lifetime, ReturnType, Stmt, StmtMacro, Token, Type, TypeReference,
 };
 
-/// Creates a generator function.
+/// Marks a function as a [`gtor`](../gtor/index.html) generator.
+///
+/// This attribute macro rewrites the annotated function so that it returns a `Generator` instead
+/// of running its body directly. Inside the body, `yield_value!(expr)` may be used to suspend the
+/// generator and hand `expr` back to the caller; it is rewritten into
+/// `ctx.yield_value(expr).await`, where `ctx` is a `GeneratorContext` passed into the body.
+///
+/// # Attributes
+///
+/// The attribute takes a single required argument:
+///
+/// * `yield_type`: the type of the values the generator yields.
+///
+/// # Behavior
+///
+/// The function's declared return type selects how the resulting generator is driven:
+///
+/// * No return type (or `-> ()`): the generator implements `Iterator<Item = {yield_type}>`.
+/// * A return type `R`: the generator implements
+///   `Iterator<Item = gtor::GeneratorItem<{yield_type}, R>>`; the function's final value is
+///   delivered as `GeneratorItem::Return`.
+/// * `-> !`: the generator never completes and does not implement `Iterator`; drive it with
+///   `gtor::Generator::next_value`.
 ///
 /// # Example
 ///
-/// ```
-/// use gtor_macro::generator;
+/// The example below is shown for illustration; a runnable version (with the same semantics)
+/// lives in the [crate docs of `gtor`](../gtor/index.html). It is marked `ignore` here because
+/// `gtor` depends on `gtor-macro`, not the other way around, so `gtor` cannot be imported from
+/// this crate's doctest context.
+///
+/// ```ignore
+/// use gtor::generator;
 /// use std::pin::pin;
 ///
 /// #[generator(yield_type = usize)]
-/// fn generate_numbers(from: usize, count: usize) {
-///     let mut i = from;
-///     while i < from + count {
-///         yield_value!(i);
-///         i += 1;
+/// fn count_down() {
+///     for x in (1..10).rev() {
+///         if x > 5 {
+///             yield_value!(x);
+///         }
 ///     }
 /// }
 ///
-/// let mut expected = vec![15, 14, 13, 12];
-/// for i in pin!(generate_numbers(12, 4)) {
-///     assert_eq!(expected.pop().unwrap(), i);
+/// fn main() {
+///     let mut expected = [9, 8, 7, 6].into_iter();
+///     for val in pin!(count_down()) {
+///         assert_eq!(expected.next().unwrap(), val);
+///     }
+///     assert!(expected.next().is_none());
 /// }
-/// assert!(expected.is_empty());
 /// ```
 #[proc_macro_attribute]
 pub fn generator(attr: TokenStream, input: TokenStream) -> TokenStream {
