@@ -494,7 +494,7 @@ fn generator_waker<Y>(state: &mut State<Y>) -> Waker {
 ///     let gen = create_generator(async move |mut ctx: GeneratorContext<usize>| {
 ///         let base = 12;
 ///         for i in 1..=3 {
-///             ctx.yield_value(i * base).await;
+///             unsafe { ctx.yield_value(i * base).await; }
 ///         }
 ///     });
 ///
