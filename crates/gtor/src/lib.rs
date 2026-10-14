@@ -51,6 +51,26 @@
 //!
 //! You can also build a generator without the macro via [`create_generator`] (see its docs for
 //! an example).
+//!
+//! # Pinning
+//!
+//! Driving a generator requires `&mut` access to it (see the `Iterator` implementations for
+//! `Pin<&mut Generator>` and `Pin<Box<Generator>>`). Because a `Generator` contains a `Future`
+//! that keeps internal state across polls, it must not be moved once it has been polled; moving
+//! it could leave the future pointing at its own old location. Rust's [`Pin`] type is what
+//! expresses and enforces this "may not be moved" guarantee. See the
+//! [official `std::pin` documentation](https://doc.rust-lang.org/stable/std/pin/index.html) for
+//! the full picture; the short version is that a `Generator` is only usable through `Pin`.
+//!
+//! You create the `Pin` where the generator is allocated:
+//!
+//! * [`pin!`](std::pin::pin) pins the generator **on the stack**: the value lives in a local
+//!   variable, and the `pin!` macro simply prevents the compiler from moving it. The generator
+//!   must not outlive the scope in which it was created.
+//! * `Box::pin(...)` pins the generator **on the heap**: the value is allocated in a `Box` and
+//!   the box pointer (not the value) is what is moved around, so the heap allocation itself stays
+//!   in place. This is the option to use when the generator has to outlive the current scope, be
+//!   stored in a struct, or be returned from a function.
 #[cfg(test)]
 mod test;
 
