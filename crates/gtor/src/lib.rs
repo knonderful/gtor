@@ -1,13 +1,14 @@
-//! `gtor` allows users to write generators in Rust that are easy to write and easy to poll.
-//! Some highlights about the generators:
+//! `gtor` allows you to write generators in Rust that are easy to write and easy to poll.
 //!
-//! * They can yield values.
-//! * They can take input arguments.
-//! * They can optionally return a result upon completion.
-//! * All input arguments, yields and return values can be passed by value or by reference.
-//!   * The borrow checker prevents any borrowing violations, just like in regular Rust code.
-//! * They are stackless.
-//! * They can live on the stack (using `pin!()`) or the heap (using `Box::pin()`).
+//! # Features
+//!
+//! - Generators can yield values of any type, chosen per-generator via `yield_type`.
+//! - Generators can take input arguments, just like ordinary functions.
+//! - Generators can optionally return a final result value when they complete.
+//! - All input arguments, yielded values, and return values can be passed by value or by reference.
+//! - The borrow checker prevents any borrowing violations, just like in regular Rust code.
+//! - Generators are stackless (they don't have their own stack that is suspended and restored).
+//! - A generator can live on the stack (using [`pin!`](https://doc.rust-lang.org/stable/std/macro.pin.html)) or on the heap (using `Box::pin()`).
 //!
 //! ```
 //! use gtor::{GeneratorItem, generator};
@@ -30,6 +31,26 @@
 //!     assert!(expected.next().is_none());
 //! }
 //! ```
+//!
+//! # How it works
+//!
+//! A `#[generator]`-annotated function is rewritten by the `gtor_macro` attribute macro into an
+//! ordinary function that returns a [`Generator`]. The function body becomes an async block, and
+//! each `yield_value!(x)` is rewritten into `ctx.yield_value(x).await`, where `ctx` is a
+//! [`GeneratorContext`] passed into the body. A [`Generator`] is a [`Future`] under the hood, so
+//! driving a generator is just polling that future; no separate stack is allocated or saved for
+//! the generator's state.
+//!
+//! Depending on the declared return type, a generator is driven one of three ways:
+//!
+//! * No return type (or `-> ()`): it implements `Iterator<Item = Y>`.
+//! * A return type `R`: it implements `Iterator<Item = GeneratorItem<Y, R>>`, and you can also
+//!   use [`Generator::next_item`].
+//! * `-> !`: it never completes and does not implement `Iterator`; drive it with
+//!   [`Generator::next_value`].
+//!
+//! You can also build a generator without the macro via [`create_generator`] (see its docs for
+//! an example).
 #[cfg(test)]
 mod test;
 
@@ -171,6 +192,23 @@ impl<Y> Future for Yield<'_, Y> {
 }
 
 /// A [`Future`]-based generator that can yield any number of instances of `Y`.
+///
+/// A `Generator` is what a function annotated with the [`generator`] attribute macro turns into:
+/// calling the function creates a `Generator` that, when driven,
+/// hands back the values the function `yield_value!`s. It is stackless: it has no stack of its
+/// own, and driving it is simply polling the `Future` it wraps.
+///
+/// Depending on the generator function's return type, `Y` is produced one of three ways:
+///
+/// * No return type (or `-> ()`): a `Generator` over a future whose output is `()` implements
+///   `Iterator<Item = Y>`.
+/// * A return type `R`: a `Generator` over a future whose output is `Return<R>` implements
+///   `Iterator<Item = GeneratorItem<Y, R>>`.
+/// * `-> !`: a `Generator` over a future whose output is [`Never`] never completes. It does not
+///   implement `Iterator`; drive it with [`Generator::next_value`].
+///
+/// A `Generator` can live on the stack (using [`pin!`](std::pin::pin)) or on the heap (using
+/// `Box::pin()`).
 pub struct Generator<F, Y> {
     future: F,
     state: State<Y>,
@@ -189,12 +227,23 @@ impl<F, Y> Generator<F, Y> {
 
 /// An iterator item spawned from a generator that returns a result value.
 ///
+/// This is the `Item` of the [`Iterator`] implemented by a generator whose function has a
+/// return type: each yielded value is delivered as [`GeneratorItem::Yield`], and the final
+/// result the function returns as [`GeneratorItem::Return`].
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum GeneratorItem<Y, R> {
+    /// A value the generator yielded via `yield_value!`.
     Yield(Y),
+    /// The final result the generator function returned when it completed.
     Return(R),
 }
 
+/// The final result value of a generator function.
+///
+/// This is normally not constructed directly: a generator function whose return type is `R`
+/// produces a future whose output is `Return<R>` (which is how the [`Generator`] implements
+/// `Iterator<Item = GeneratorItem<Y, R>>`). The `R` inside can be reached by
+/// destructuring the `Return`.
 #[must_use]
 pub struct Return<R>(R);
 
@@ -204,10 +253,27 @@ impl<R> From<R> for Return<R> {
     }
 }
 
+/// Bridges a generator's future output type to the `Item` of its [`Iterator`] implementation.
+///
+/// A [`Generator`] is `Future`-based, but consumers drive it with `Iterator`. This trait
+/// describes how the concrete output type of the wrapped future maps yields and completion to
+/// iterator items:
+///
+/// * Output `()` (a generator with no final result): items are the yielded values `Y`
+///   themselves, and completion produces nothing.
+/// * Output [`Return<R>`] (a generator with a final result): items are
+///   [`GeneratorItem<Y, R>`], with completion producing `GeneratorItem::Return`.
+///
+/// This is implemented for the output types the `#[generator]` macro can produce. It is not
+/// expected to be implemented for user types.
 pub trait IterableGenerator<Y> {
+    /// The `Item` of the [`Iterator`] this output type corresponds to.
     type Item;
 
+    /// Wraps a yielded value into an iterator item.
     fn create_yield(value: Y) -> Self::Item;
+
+    /// Turns completion (the future's output) into an iterator item, if any.
     fn create_return(result: Self) -> Option<Self::Item>;
 }
 
@@ -239,6 +305,18 @@ impl<F, Y, R> Generator<F, Y>
 where
     F: Future<Output = R>,
 {
+    /// Drives the generator until it yields a value or completes, returning either.
+    ///
+    /// This is the low-level polling primitive. It polls the underlying future exactly once and
+    /// reports what happened:
+    ///
+    /// * `GeneratorItem::Yield(y)` if the generator `yield_value!`d `y` before being suspended,
+    /// * `GeneratorItem::Return(r)` if the generator function completed with result `r`.
+    ///
+    /// It panics in debug builds if the generator is polled after it has already completed, and
+    /// at runtime if the future suspends on something other than a `yield_value!` (i.e. it
+    /// `await`ed an unsupported future). For ordinary iteration, prefer the `Iterator`
+    /// implementation or [`Generator::next_item`]/[`Generator::next_value`].
     pub fn poll_next(self: Pin<&mut Self>) -> GeneratorItem<Y, R> {
         debug_assert!(!self.finished, "Future was polled after it has finished.");
 
@@ -300,6 +378,14 @@ impl<F, Y> Generator<F, Y>
 where
     F: Future<Output = Never>,
 {
+    /// Returns the next value yielded by an infinite generator.
+    ///
+    /// This is available for generators declared `-> !`, whose output is [`Never`]. Because such
+    /// a generator never completes, it does not implement `Iterator`; instead the caller drives
+    /// it on demand by repeatedly calling this method.
+    ///
+    /// Panics if the generator somehow completes (which should be impossible, since its return
+    /// type is `Never`).
     pub fn next_value(self: Pin<&mut Self>) -> Y {
         match self.poll_next() {
             GeneratorItem::Yield(yielded) => yielded,
@@ -312,6 +398,12 @@ impl<F, Y, R> Generator<F, Y>
 where
     F: Future<Output = Return<R>>,
 {
+    /// Returns the next [`GeneratorItem`] yielded by a generator that has a final result.
+    ///
+    /// This is available for generators whose output is [`Return<R>`]. It is a non-`Option`
+    /// alternative to the `Iterator` implementation: each call returns either
+    /// [`GeneratorItem::Yield`] or the terminal [`GeneratorItem::Return`], letting the caller
+    /// match on both explicitly rather than unwrapping an `Option`.
     pub fn next_item(self: Pin<&mut Self>) -> GeneratorItem<Y, R> {
         match self.poll_next() {
             GeneratorItem::Yield(yielded) => GeneratorItem::Yield(yielded),
@@ -327,6 +419,11 @@ where
 {
     type Item = <F::Output as IterableGenerator<Y>>::Item;
 
+    /// Returns the next yielded value, or `None` once the generator has completed.
+    ///
+    /// For a generator with no final result, `Item` is the yielded value `Y`. For a generator
+    /// with a final result, `Item` is [`GeneratorItem<Y, R>`] and the final `Some` value is
+    /// `GeneratorItem::Return`.
     fn next(&mut self) -> Option<Self::Item> {
         self.as_mut().iter_next()
     }
@@ -339,6 +436,7 @@ where
 {
     type Item = <F::Output as IterableGenerator<Y>>::Item;
 
+    /// Returns the next yielded value, or `None` once the generator has completed.
     fn next(&mut self) -> Option<Self::Item> {
         self.as_mut().iter_next()
     }
@@ -358,6 +456,33 @@ fn generator_waker<Y>(state: &State<Y>) -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(state_ptr.cast::<()>(), &VTABLE)) }
 }
 
+/// Creates a [`Generator`] from an async closure that yields through a [`GeneratorContext`].
+///
+/// This is the manual counterpart to the [`generator`] attribute macro. `future_factory` is
+/// called once with a fresh [`GeneratorContext`] and returns a future; every
+/// time that future `await`s a value produced by [`GeneratorContext::yield_value`], the resulting
+/// generator suspends and hands that value back to the caller.
+///
+/// ```
+/// use gtor::{create_generator, GeneratorContext};
+/// use std::pin::pin;
+///
+/// fn main() {
+///     let gen = create_generator(async move |mut ctx: GeneratorContext<usize>| {
+///         let base = 12;
+///         for i in 1..=3 {
+///             ctx.yield_value(i * base).await;
+///         }
+///     });
+///
+///     let mut expected = vec![36, 24, 12];
+///     let mut gen = pin!(gen);
+///     for item in &mut gen {
+///         assert_eq!(expected.pop().unwrap(), item);
+///     }
+///     assert_eq!(None, gen.as_mut().next());
+/// }
+/// ```
 pub fn create_generator<F, Y>(future_factory: impl FnOnce(GeneratorContext<Y>) -> F) -> Generator<F, Y>
 where
     F: Future,
@@ -367,6 +492,13 @@ where
     Generator::new(future, state)
 }
 
+/// Creates a [`Generator`] from an async closure, applying a mapping to the resulting future.
+///
+/// This behaves like [`create_generator`], but the future returned by `future_factory` is first
+/// transformed by `future_map` before being wrapped. This is what the [`generator`] macro uses to
+/// adapt the future's output type (for example to wrap a final result in [`Return`]).
+///
+/// For most code, use `create_generator` directly or, better, the `#[generator]` macro.
 pub fn create_generator_mapped<F, Y, F2>(
     future_factory: impl FnOnce(GeneratorContext<Y>) -> F,
     future_map: impl FnOnce(F) -> F2,
